@@ -167,7 +167,10 @@ screening = compute_single_patient(
 )
 screening_saved = screening["CO2_saved_kg"]
 
-oph_params = {k: st.session_state.get(f"oph_{k}", v) for k, v in DEFAULT_PARAMS.items()}
+# Pull any overrides the person has made on the Ophthalmology Calculator page
+# (that page's widget keys match the parameter names in DEFAULT_PARAMS exactly —
+# e.g. "c_phaco_min", "ivi_visits_yr" — so no prefix translation is needed).
+oph_params = {k: st.session_state.get(k, v) for k, v in DEFAULT_PARAMS.items()}
 oph_results = compute_all(oph_params)
 
 if is_cataract:
