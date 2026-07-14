@@ -12,7 +12,6 @@ EF = {
     "pp": 3.4, "pe": 2.0, "pvc": 3.1, "nitrile": 4.2, "cotton": 5.0,
     "steel": 2.9, "glass": 0.8, "paper": 0.9,
     "waste_yellow": 0.679, "waste_red": 0.467, "waste_green": -0.1,
-    "pharma_usd": 0.43,
 }
 
 LVPEI = {
@@ -22,6 +21,7 @@ LVPEI = {
     "oct_w": 180, "oct_min": 5,
     "clarus_w": 250, "clarus_min": 5,
     "bscan_w": 40, "bscan_min": 5,
+    "perimeter_w": 150, "perimeter_min": 8,   # Humphrey-type visual field analyzer, ~4 min/eye
     "centurion_w": 400,
     "lumera_w": 250,
     "ot_light_w": 350,
@@ -39,9 +39,17 @@ DEFAULT_PARAMS = {
     "glove_pairs": 4.0,
     "cssd_kwh_day": 128.0,
     "ivi_visits_yr": 8.0,
-    "pharma_cost_phaco": 500.0,
-    "pharma_cost_ivi": 3000.0,
-    "exchange_rate": 83.5,
+    "glaucoma_visits_yr": 3.0,          # typical monitoring frequency (IOP not surgically controlled)
+}
+
+# Pharmaceutical emissions (Scope 3, EIO-LCA proxy) — fixed kgCO2e assumptions.
+# No cost/currency inputs anywhere in this app; these are locked figures derived
+# once from an economic input-output LCA proxy and then hardcoded as emissions,
+# same as every other "locked assumption" in this file (grid EF, material EFs, etc).
+PHARMA_KGCO2 = {
+    "phaco": 2.5749,          # per cataract surgery case
+    "ivi": 15.4491,           # per anti-VEGF injection visit
+    "glaucoma_yr": 6.1796,    # per year of topical IOP-lowering medication
 }
 
 
@@ -65,6 +73,11 @@ def compute_diag():
     clarus = co2(LVPEI["clarus_w"], LVPEI["clarus_min"])
     bscan = co2(LVPEI["bscan_w"], LVPEI["bscan_min"])
     return {"oct": oct_, "clarus": clarus, "bscan": bscan}
+
+
+def compute_glaucoma_diag():
+    perimetry = co2(LVPEI["perimeter_w"], LVPEI["perimeter_min"])
+    return {"perimetry": perimetry}
 
 
 def compute_surgery(phaco_min, phaco_cases_day, ot_hours):
@@ -120,10 +133,12 @@ def compute_ivi_consumables():
     return {"items": items, "total": sum(i["co2"] for i in items)}
 
 
-def compute_pharma(pharma_cost_phaco, pharma_cost_ivi, exchange_rate):
-    phaco = (pharma_cost_phaco / exchange_rate) * EF["pharma_usd"] if exchange_rate else 0
-    ivi = (pharma_cost_ivi / exchange_rate) * EF["pharma_usd"] if exchange_rate else 0
-    return {"phaco": phaco, "ivi": ivi}
+def compute_pharma():
+    return {
+        "phaco": PHARMA_KGCO2["phaco"],
+        "ivi": PHARMA_KGCO2["ivi"],
+        "glaucoma": PHARMA_KGCO2["glaucoma_yr"],
+    }
 
 
 def compute_waste():
@@ -146,11 +161,12 @@ def compute_all(params: dict = None):
 
     opd = compute_opd()
     diag = compute_diag()
+    glaucoma_diag = compute_glaucoma_diag()
     surgery = compute_surgery(p["phaco_min"], p["phaco_cases_day"], p["ot_hours"])
     cssd_per_case = compute_cssd(p["cssd_kwh_day"], p["surg_cases_day"])
     consumables = compute_consumables(p["glove_pairs"])
     ivi_consumables = compute_ivi_consumables()
-    pharma = compute_pharma(p["pharma_cost_phaco"], p["pharma_cost_ivi"], p["exchange_rate"])
+    pharma = compute_pharma()
     waste = compute_waste()
 
     phaco_grand = (
@@ -167,10 +183,22 @@ def compute_all(params: dict = None):
     per_ivi_visit = opd["total"] + diag["oct"] + ivi_consumables["total"] + pharma["ivi"] + waste_per_ivi
     dr_episode_year = (per_ivi_visit * p["ivi_visits_yr"]) + diag["clarus"]
 
+    # A normal eye checkup: OPD encounter only (slit lamp + autorefractor + NCT).
+    # No OCT, no surgery, no consumables/CSSD/pharma/waste — just the screening visit.
+    opd_only_episode = opd["total"]
+
+    # Glaucoma is monitored, not "cured" in one episode — chronic follow-up visits
+    # (OPD + IOP check via NCT + visual field test) plus ongoing topical medication.
+    # No surgical consumables/CSSD; waste is minimal (cotton, disposable wipes).
+    waste_per_glaucoma_visit = 0.015 * EF["waste_yellow"]
+    per_glaucoma_visit = opd["total"] + glaucoma_diag["perimetry"] + waste_per_glaucoma_visit
+    glaucoma_episode_year = (per_glaucoma_visit * p["glaucoma_visits_yr"]) + diag["oct"] + pharma["glaucoma"]
+
     return {
         "params": p,
         "opd": opd,
         "diag": diag,
+        "glaucoma_diag": glaucoma_diag,
         "surgery": surgery,
         "cssd_per_case": cssd_per_case,
         "consumables": consumables,
@@ -181,4 +209,7 @@ def compute_all(params: dict = None):
         "cataract_episode": cataract_episode,
         "dr_episode_year": dr_episode_year,
         "per_ivi_visit": per_ivi_visit,
+        "opd_only_episode": opd_only_episode,
+        "per_glaucoma_visit": per_glaucoma_visit,
+        "glaucoma_episode_year": glaucoma_episode_year,
     }

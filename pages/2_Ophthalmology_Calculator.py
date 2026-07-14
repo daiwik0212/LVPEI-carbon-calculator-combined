@@ -55,7 +55,7 @@ st.markdown('<div class="page-sub">Facility-based emissions for cataract surgery
 # ---------------------------------------------------------------------------
 
 with st.expander("⚙️ Adjustable Parameters", expanded=False):
-    p1, p2, p3 = st.columns(3)
+    p1, p2 = st.columns(2)
     with p1:
         st.markdown("**Surgery**")
         phaco_min = st.number_input("Phaco duration (min)", min_value=1.0, value=15.0, step=1.0, key="oph_phaco_min")
@@ -63,15 +63,13 @@ with st.expander("⚙️ Adjustable Parameters", expanded=False):
         surg_cases_day = st.number_input("Total surgical cases / day", min_value=1.0, value=60.0, step=1.0, key="oph_surg_cases_day")
         ot_hours = st.number_input("OT operating hours", min_value=1.0, value=8.0, step=1.0, key="oph_ot_hours")
     with p2:
-        st.markdown("**Consumables & CSSD**")
+        st.markdown("**Consumables, CSSD & Visit Frequency**")
         glove_pairs = st.number_input("Glove pairs / case", min_value=0.0, value=4.0, step=1.0, key="oph_glove_pairs")
         cssd_kwh_day = st.number_input("CSSD kWh / day", min_value=0.0, value=128.0, step=1.0, key="oph_cssd_kwh_day")
         ivi_visits_yr = st.number_input("IVI visits / year (DR pathway)", min_value=0.0, value=8.0, step=1.0, key="oph_ivi_visits_yr")
-    with p3:
-        st.markdown("**Pharma**")
-        pharma_cost_phaco = st.number_input("Pharma cost / phaco case (₹)", min_value=0.0, value=500.0, step=50.0, key="oph_pharma_cost_phaco")
-        pharma_cost_ivi = st.number_input("Pharma cost / IVI (₹)", min_value=0.0, value=3000.0, step=100.0, key="oph_pharma_cost_ivi")
-        exchange_rate = st.number_input("Exchange rate (₹/USD)", min_value=1.0, value=83.5, step=0.5, key="oph_exchange_rate")
+        glaucoma_visits_yr = st.number_input("Monitoring visits / year (Glaucoma)", min_value=0.0, value=3.0, step=1.0, key="oph_glaucoma_visits_yr")
+
+st.caption("Pharmaceutical emissions (phaco, IVI, glaucoma medication) use fixed kgCO₂e assumptions — see the Reference tab.")
 
 # ---------------------------------------------------------------------------
 # Calculations (delegated to ophthalmology_calc.py — the single source of truth)
@@ -85,15 +83,14 @@ results = compute_all({
     "glove_pairs": glove_pairs,
     "cssd_kwh_day": cssd_kwh_day,
     "ivi_visits_yr": ivi_visits_yr,
-    "pharma_cost_phaco": pharma_cost_phaco,
-    "pharma_cost_ivi": pharma_cost_ivi,
-    "exchange_rate": exchange_rate,
+    "glaucoma_visits_yr": glaucoma_visits_yr,
 })
 
 opd_total = results["opd"]["total"]
 diag_oct = results["diag"]["oct"]
 diag_clarus = results["diag"]["clarus"]
 diag_bscan = results["diag"]["bscan"]
+glaucoma_perimetry = results["glaucoma_diag"]["perimetry"]
 surgery_total = results["surgery"]["total"]
 surg_centurion = results["surgery"]["centurion"]
 surg_lumera = results["surgery"]["lumera"]
@@ -107,6 +104,7 @@ ivi_items = results["ivi_consumables"]["items"]
 ivi_consumables_total = results["ivi_consumables"]["total"]
 pharma_phaco = results["pharma"]["phaco"]
 pharma_ivi = results["pharma"]["ivi"]
+pharma_glaucoma = results["pharma"]["glaucoma"]
 waste_yellow = results["waste"]["yellow"]
 waste_red = results["waste"]["red"]
 waste_green = results["waste"]["green"]
@@ -115,15 +113,19 @@ waste_total = results["waste"]["total"]
 phaco_grand = results["phaco_grand"]
 cataract_episode = results["cataract_episode"]
 dr_episode_year = results["dr_episode_year"]
+per_glaucoma_visit = results["per_glaucoma_visit"]
+glaucoma_episode_year = results["glaucoma_episode_year"]
 
 # ---------------------------------------------------------------------------
 # Top summary cards
 # ---------------------------------------------------------------------------
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Per phaco case", f"{phaco_grand:.3f} kg CO₂e", f"Aravind benchmark: 5.89 kg")
 m2.metric("Cataract episode", f"{cataract_episode:.3f} kg CO₂e", "OPD → surgery → follow-up (5 visits)")
 m3.metric("DR / IVI episode", f"{dr_episode_year:.3f} kg CO₂e", f"{ivi_visits_yr:.0f} visits/year")
+m4.metric("Glaucoma monitoring", f"{glaucoma_episode_year:.3f} kg CO₂e", f"{glaucoma_visits_yr:.0f} visits/year")
+
 
 # ---------------------------------------------------------------------------
 # Tabs (mirrors the original React tab bar)
@@ -185,11 +187,13 @@ with tabs[2]:
     row("Topcon DRI OCT Triton", diag_oct, note="~180W × 5 min, 12 patients/day")
     row("Zeiss Clarus 700 fundus camera", diag_clarus, note="~250W × 5 min, 12 patients/day")
     row("Accutome B-scan", diag_bscan, note="~40W × 5 min, 30 patients/day")
+    row("Visual field perimeter (glaucoma pathway)", glaucoma_perimetry, note="~150W × 8 min, est.")
     st.markdown("---")
     section("Diagnostic combinations by condition pathway")
     row("Cataract patient: OCT only", diag_oct)
     row("DR patient: OCT + Clarus (FFA)", diag_oct + diag_clarus, note="+ FFA consumables (Scope 3)")
     row("VR patient: OCT + B-scan", diag_oct + diag_bscan)
+    row("Glaucoma patient: OCT + perimetry (per monitoring visit)", diag_oct + glaucoma_perimetry, note="OCT is annual baseline; perimetry is per-visit")
 
 # ---- Phaco Surgery ----
 with tabs[3]:
@@ -240,9 +244,9 @@ with tabs[6]:
     row("Phaco pharma emissions", pharma_phaco, highlight=True)
     row("IVI pharma emissions", pharma_ivi, highlight=True)
     st.caption(
-        "EIO-LCA: ₹ → USD → × 0.43 kgCO₂e/USD (Carnegie Mellon, NAICS 325411). Proxy — no Indian "
-        "pharma LCI exists. IVI is dramatically higher because the bevacizumab vial is not split "
-        "across patients. Costs are adjustable in the panel above."
+        "Fixed kgCO₂e assumptions derived from an economic input-output LCA proxy (Carnegie Mellon, "
+        "NAICS 325411) — no Indian pharma LCI exists. IVI is dramatically higher because the "
+        "bevacizumab vial is not split across patients."
     )
 
     st.markdown("---")
@@ -274,12 +278,27 @@ with tabs[7]:
     row("Per IVI visit", dr_episode_year / ivi_visits_yr if ivi_visits_yr else 0)
 
     st.markdown("---")
+    section(f"Glaucoma Monitoring Episode ({glaucoma_visits_yr:.0f} visits/year)")
+    row(f"OPD + visual field test + minor waste × {glaucoma_visits_yr:.0f} visits", per_glaucoma_visit * glaucoma_visits_yr)
+    row("OCT (optic nerve/RNFL) × 1 (baseline)", diag_oct)
+    row("Topical medication (annual, EIO-LCA proxy)", pharma_glaucoma)
+    row("TOTAL glaucoma monitoring (per year)", glaucoma_episode_year, highlight=True)
+    row("Per monitoring visit", per_glaucoma_visit)
+    st.caption(
+        "No surgery, CSSD, or single-use surgical consumables — glaucoma is managed medically here, "
+        "not surgically. Footprint is dominated by ongoing topical medication, not clinic energy use. "
+        "Visit frequency is adjustable above; the medication emissions figure is a fixed assumption — "
+        "confirm against LVPEI glaucoma clinic data."
+    )
+
+    st.markdown("---")
     section("Pathway Comparison")
-    max_ep = max(cataract_episode, dr_episode_year)
+    max_ep = max(cataract_episode, dr_episode_year, glaucoma_episode_year)
     bar("Cataract (one-time episode)", cataract_episode, max_ep)
     bar(f"DR / IVI (annual, {ivi_visits_yr:.0f} visits)", dr_episode_year, max_ep)
+    bar(f"Glaucoma (annual, {glaucoma_visits_yr:.0f} visits)", glaucoma_episode_year, max_ep)
     ratio = (dr_episode_year / cataract_episode) if cataract_episode else 0
-    driver = "pharma cost (single-use bevacizumab vials)" if pharma_ivi > (opd_total * ivi_visits_yr) else "repeat visit volume"
+    driver = "pharma emissions (single-use bevacizumab vials)" if pharma_ivi > (opd_total * ivi_visits_yr) else "repeat visit volume"
     st.caption(f"DR/IVI is {ratio:.1f}× the cataract episode. The dominant driver is {driver}.")
 
 # ---- Reference ----

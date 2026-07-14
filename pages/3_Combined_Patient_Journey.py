@@ -117,10 +117,20 @@ col_left, col_right = st.columns([1, 2])
 with col_left:
     pathway = st.radio(
         "Care pathway",
-        ["Cataract (one-time episode)", "Diabetic Retinopathy / IVI (annual)"],
+        [
+            "Cataract (one-time episode)",
+            "Diabetic Retinopathy / IVI (annual)",
+            "Glaucoma monitoring (annual)",
+            "General eye checkup (OPD only, no surgery)",
+            "Teleconsultation only (no in-person follow-up)",
+        ],
         key="journey_pathway",
     )
     is_cataract = pathway.startswith("Cataract")
+    is_dr = pathway.startswith("Diabetic")
+    is_glaucoma = pathway.startswith("Glaucoma")
+    is_checkup = pathway.startswith("General eye checkup")
+    is_tele_only = pathway.startswith("Teleconsultation")
 
 with col_right:
     t1, t2 = st.columns(2)
@@ -159,7 +169,22 @@ screening_saved = screening["CO2_saved_kg"]
 
 oph_params = {k: st.session_state.get(f"oph_{k}", v) for k, v in DEFAULT_PARAMS.items()}
 oph_results = compute_all(oph_params)
-treatment_emissions = oph_results["cataract_episode"] if is_cataract else oph_results["dr_episode_year"]
+
+if is_cataract:
+    treatment_emissions = oph_results["cataract_episode"]
+    treatment_label = "cataract surgery episode (5 visits)"
+elif is_dr:
+    treatment_emissions = oph_results["dr_episode_year"]
+    treatment_label = f'DR/IVI care ({oph_params["ivi_visits_yr"]:.0f} visits/year)'
+elif is_glaucoma:
+    treatment_emissions = oph_results["glaucoma_episode_year"]
+    treatment_label = f'glaucoma monitoring ({oph_params["glaucoma_visits_yr"]:.0f} visits/year + topical medication)'
+elif is_checkup:
+    treatment_emissions = oph_results["opd_only_episode"]
+    treatment_label = "general OPD checkup (slit lamp + autorefractor + NCT, no surgery)"
+else:  # is_tele_only
+    treatment_emissions = 0.0
+    treatment_label = "no in-person visit — screening only"
 
 net = treatment_emissions - screening_saved
 
@@ -184,7 +209,7 @@ with r2:
         <div class="result-label">🏥 Treatment at LVPEI</div>
         <div class="result-value red-val">{treatment_emissions:.2f}</div>
         <div class="result-unit">kg CO₂e</div>
-        <div class="result-sub">CO₂ <strong>emitted</strong> by {'cataract surgery episode (5 visits)' if is_cataract else f'DR/IVI care ({oph_params["ivi_visits_yr"]:.0f} visits/year)'}</div>
+        <div class="result-sub">CO₂ <strong>emitted</strong> by {treatment_label}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -269,7 +294,12 @@ with b2:
     st.caption(f"🔴 CO₂ emitted during treatment — **{treatment_emissions:.2f} kg**")
     st.progress(pct2)
 
-if screening_saved > 0:
+if treatment_emissions == 0:
+    if screening_saved > 0:
+        st.info(f"No in-person treatment in this scenario — the full **{screening_saved:.2f} kg CO₂e** is a pure saving from teleconsultation, nothing to offset it against.")
+    else:
+        st.warning("Screening savings are zero or negative — the patient lives closer to the alternative hospital than to the Vision Centre. Adjust the distances above.")
+elif screening_saved > 0:
     ratio = treatment_emissions / screening_saved
     st.info(f"Treatment emissions are **{ratio:.1f}×** the teleconsultation screening savings for this scenario. The net journey still has a carbon cost, but teleconsultation screening reduced it by **{(screening_saved / treatment_emissions * 100):.1f}%**.")
 else:
@@ -290,7 +320,7 @@ with ec1:
         <div class="net-value">{net:.2f}</div>
         <div class="net-unit">kg CO₂e</div>
         <div class="net-sub">
-            {'Cataract episode' if is_cataract else f'DR/IVI ({oph_params["ivi_visits_yr"]:.0f} visits/yr)'}<br>
+            {treatment_label.capitalize()}<br>
             after crediting teleconsultation screening savings
         </div>
     </div>
@@ -315,7 +345,7 @@ with ec2:
     </div>
     <div class="equiv-row">
         <span class="equiv-label">📉 Teleconsultation reduced the treatment footprint by</span>
-        <span class="equiv-value">{(screening_saved / treatment_emissions * 100):.1f}%</span>
+        <span class="equiv-value">{(f"{(screening_saved / treatment_emissions * 100):.1f}%" if treatment_emissions > 0 else "n/a — no treatment visit in this scenario")}</span>
     </div>
     """, unsafe_allow_html=True)
 
