@@ -1,4 +1,4 @@
-"""
+    """
 Ophthalmology (facility-based) carbon calculation engine.
 Pure functions only — no Streamlit calls — so this can be imported by both
 the Ophthalmology Calculator page and the Combined Patient Journey page.
