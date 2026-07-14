@@ -88,7 +88,12 @@ clean_df, missing_cols, rows_defaulted = validate_and_fill_defaults(raw_df)
 clean_df["distance_to_vc_km"] = clean_df["distance_to_vc_km"].fillna(default_dist_vc)
 clean_df["distance_to_alternative_km"] = clean_df["distance_to_alternative_km"].fillna(default_dist_alt)
 
-df = clean_df.copy()
+# ── EDITABLE PATIENT DATA (persists edits across reruns, resets if data source changes) ──
+if st.session_state.get("tele_data_key") != data_label:
+    st.session_state["tele_data_key"] = data_label
+    st.session_state["tele_edited_df"] = clean_df.copy()
+
+df = st.session_state["tele_edited_df"].copy()
 modal_ef = df["transport_mode"].map(TRANSPORT_EF).fillna(TRANSPORT_EF["Bus"])
 multiplier = 1 + df["accompanying_persons"]
 
@@ -203,16 +208,22 @@ fig3.update_layout(
 )
 st.plotly_chart(fig3, use_container_width=True)
 
-# ── PER-PATIENT TABLE ─────────────────────────────────────────────────────────
+# ── PER-PATIENT TABLE (editable) ──────────────────────────────────────────────
 st.markdown('<div class="section-title">Per-Patient Detail</div>', unsafe_allow_html=True)
+st.caption("✏️ Triage, Transport, and both distances are editable — double-click a cell to change it. CO₂ figures recalculate automatically.")
 
-fa, fb, fc = st.columns(3)
+fa, fb, fc, fd = st.columns([1, 1, 1, 0.6])
 with fa:
     triage_filter = st.multiselect("Triage", ["Green", "Yellow", "Red"], default=["Green", "Yellow", "Red"])
 with fb:
     mode_filter = st.multiselect("Transport mode", list(TRANSPORT_EF.keys()), default=list(TRANSPORT_EF.keys()))
 with fc:
     show_neg = st.checkbox("Edge cases only (ΔE < 0)")
+with fd:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("↺ Reset edits"):
+        st.session_state["tele_edited_df"] = clean_df.copy()
+        st.rerun()
 
 disp = df[df["triage_outcome"].isin(triage_filter) & df["transport_mode"].isin(mode_filter)]
 if show_neg:
@@ -231,7 +242,36 @@ table.columns = [
 for col in ["Counterfactual CO₂ (kg)", "Teleconsult CO₂ (kg)", "ΔE Saved (kg)", "Trees Equiv."]:
     table[col] = table[col].round(3)
 
-st.dataframe(table, use_container_width=True, height=400, hide_index=True)
+edited_table = st.data_editor(
+    table,
+    use_container_width=True,
+    height=400,
+    hide_index=True,
+    key="tele_patient_editor",
+    disabled=[
+        "Patient ID", "Date",
+        "Counterfactual CO₂ (kg)", "Teleconsult CO₂ (kg)", "ΔE Saved (kg)", "Trees Equiv.",
+    ],
+    column_config={
+        "Triage": st.column_config.SelectboxColumn("Triage", options=["Green", "Yellow", "Red"], required=True),
+        "Transport": st.column_config.SelectboxColumn("Transport", options=list(TRANSPORT_EF.keys()), required=True),
+        "Dist. to VC (km)": st.column_config.NumberColumn("Dist. to VC (km)", min_value=0.0, step=0.5, format="%.1f"),
+        "Dist. to Alt. (km)": st.column_config.NumberColumn("Dist. to Alt. (km)", min_value=0.0, step=0.5, format="%.1f"),
+    },
+)
+
+# Merge any edits back into the persistent store, keyed by Patient ID, then rerun so
+# every KPI/chart above recalculates off the new values.
+edit_cols = ["Triage", "Transport", "Dist. to VC (km)", "Dist. to Alt. (km)"]
+if not edited_table[edit_cols].equals(table[edit_cols]):
+    store = st.session_state["tele_edited_df"].set_index("patient_id")
+    edits = edited_table.set_index("Patient ID")[edit_cols]
+    store.loc[edits.index, "triage_outcome"] = edits["Triage"]
+    store.loc[edits.index, "transport_mode"] = edits["Transport"]
+    store.loc[edits.index, "distance_to_vc_km"] = edits["Dist. to VC (km)"]
+    store.loc[edits.index, "distance_to_alternative_km"] = edits["Dist. to Alt. (km)"]
+    st.session_state["tele_edited_df"] = store.reset_index()
+    st.rerun()
 
 if disp["is_negative"].any():
     st.markdown(f'<div class="warn-box">⚠️ {disp["is_negative"].sum()} patient(s) show negative ΔE — their distance to the alternative facility was shorter than their distance to GPR. These are edge cases.</div>', unsafe_allow_html=True)
