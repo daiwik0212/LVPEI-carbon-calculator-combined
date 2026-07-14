@@ -256,13 +256,13 @@ with t1:
     <div class="team-row">
         <div>
             <div class="team-name">Daiwik Singh &nbsp;<span style="font-weight:400;color:#8A9E8A">2024B1A41063H</span></div>
-            <div class="team-role">Tele-ophthalmology Carbon Footprint · GPR Vision Centre · B.E. Biological Sciences + M.Sc. Finance</div>
+            <div class="team-role">Tele-ophthalmology Carbon Footprint · GPR Vision Centre · M.Sc Biological Sciences + BE Mechanical</div>
         </div>
     </div>
     <div class="team-row">
         <div>
             <div class="team-name">Shlok Marda &nbsp;<span style="font-weight:400;color:#8A9E8A">2024B1A40944H</span></div>
-            <div class="team-role">Facility-based Ophthalmology Carbon Calculator · KAR Campus</div>
+            <div class="team-role">Facility-based Ophthalmology Carbon Calculator · KAR Campus · M.Sc Biological Sciences + BE Mechanical </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
