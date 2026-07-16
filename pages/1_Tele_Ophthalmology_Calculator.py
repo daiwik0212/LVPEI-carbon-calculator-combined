@@ -1,262 +1,298 @@
-
-import numpy as np
+import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
 
-# ============================================================
-# 1. EMISSION FACTORS & CONSTANTS
-# ============================================================
+from carbon_calc import (
+    TRANSPORT_EF, TREE_ABSORPTION_KGCO2_PER_YEAR, CAR_KM_EQUIV_KGCO2_PER_KM,
+    FLIGHT_EQUIV_KGCO2, GRID_EF_KGCO2_PER_KWH, TRIAGE_BENCHMARK, EXPECTED_COLUMNS,
+    DEFAULTS, generate_dummy_data, validate_and_fill_defaults,
+)
+import numpy as np_
 
-# Transport modal emission factors (kgCO2 per passenger-km)
-# Source: Rani et al. 2024 (Eye/Nature) — India-specific values
-TRANSPORT_EF = {
-    "Walking":     0.000,
-    "Bicycle":     0.000,
-    "Motorcycle":  0.061,
-    "Auto":        0.107,
-    "Bus":         0.089,
-    "Car":         0.171,
-    "Train":       0.041,
-    "Shared Taxi": 0.130,
+st.set_page_config(page_title="Tele-ophthalmology Calculator", page_icon="📡", layout="wide")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=DM+Serif+Display&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.page-title { font-family: 'DM Serif Display', serif; font-size: 2rem; color: #1A3A1A; margin-bottom:0.2rem; }
+.page-sub { font-size: 0.9rem; color: #5A7A5A; margin-bottom: 1.5rem; }
+.kpi-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.3rem 1.5rem;
+    border-left: 4px solid #2D6A2D;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.06);
 }
+.kpi-label { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em; color: #5A7A5A; margin-bottom: 0.25rem; }
+.kpi-value { font-size: 2rem; font-weight: 700; color: #1A3A1A; line-height: 1; }
+.kpi-unit { font-size: 0.82rem; color: #8A9E8A; margin-top: 0.2rem; }
+.section-title { font-family: 'DM Serif Display', serif; font-size: 1.25rem; color: #1A3A1A; margin: 1.2rem 0 0.4rem; }
+.warn-box { background: #FFF8E1; border: 1px solid #FFE082; border-radius: 10px; padding: 0.9rem 1.2rem; font-size: 0.85rem; color: #6D4C00; margin-bottom: 1rem; }
+</style>
+""", unsafe_allow_html=True)
 
-# Grid emission factor — CEA CO2 Baseline Database v21.0, FY 2024-25
-GRID_EF_KGCO2_PER_KWH = 0.7117
+st.markdown('<div class="page-title">📡 Tele-ophthalmology Carbon Calculator</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-sub">Per-patient CO₂ savings from teleconsultation screening at GPR Vision Centre, Kismathpur · GHG Protocol Scope 1/2/3 · Rani et al. 2024</div>', unsafe_allow_html=True)
 
-# Relatable-equivalent constants
-TREE_ABSORPTION_KGCO2_PER_YEAR = 21.0      # kgCO2 absorbed per tree per year
-CAR_KM_EQUIV_KGCO2_PER_KM      = 0.171     # kgCO2/km for a passenger car
-FLIGHT_EQUIV_KGCO2             = 130.0     # kgCO2 per passenger, DEL-HYD one-way
+# ── DATA SOURCE ───────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 📂 Data source")
+    use_demo = st.radio("", ["Demo data (50 patients)", "Upload eyeSmart CSV"], index=0, label_visibility="collapsed")
 
-# Triage benchmark distribution (Rani et al. 2024)
-TRIAGE_BENCHMARK = {"Green": 0.84, "Yellow": 0.08, "Red": 0.08}
+if use_demo == "Upload eyeSmart CSV":
+    uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+    if uploaded:
+        raw_df = pd.read_csv(uploaded)
+        data_label = f"📄 {uploaded.name}"
+    else:
+        st.sidebar.info("Awaiting upload — showing demo data.")
+        raw_df = generate_dummy_data()
+        data_label = "Demo data (50 simulated patients)"
+else:
+    raw_df = generate_dummy_data()
+    data_label = "Demo data (50 simulated patients)"
 
-# Expected schema for eyeSmart-style uploads
-EXPECTED_COLUMNS = [
-    "patient_id",
-    "consultation_date",
-    "triage_outcome",
-    "transport_mode",
-    "accompanying_persons",
-    "distance_to_vc_km",
-    "distance_to_alternative_km",
-]
+# ── ADJUSTABLE PARAMETERS ─────────────────────────────────────────────────────
+with st.expander("⚙️ Adjustable Parameters", expanded=False):
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.markdown("**Session & devices**")
+        session_min = st.number_input("Session duration (min)", min_value=1.0, max_value=60.0, value=10.0, step=1.0, key="tele_session_min")
+        fundus_w = st.number_input("Fundus camera wattage (W)", min_value=0, value=45, step=5, key="tele_fundus_w")
+        slit_w = st.number_input("Slit lamp wattage (W)", min_value=0, value=25, step=5, key="tele_slit_w")
+    with p2:
+        st.markdown("**Infrastructure**")
+        workstation_w = st.number_input("Workstation + monitor (W)", min_value=0, value=120, step=10, key="tele_workstation_w")
+        router_w = st.number_input("Router/networking (W)", min_value=0, value=15, step=5, key="tele_router_w")
+        dicom_mb = st.number_input("DICOM file size per consult (MB)", min_value=0.1, value=5.0, step=0.5, key="tele_dicom_mb")
+    with p3:
+        st.markdown("**Grid & data**")
+        grid_ef = st.number_input("Grid emission factor (kgCO₂/kWh)", min_value=0.0, value=0.7117, step=0.01, format="%.4f", key="tele_grid_ef",
+                                   help="CEA v21.0 FY2024-25: 0.7117. Change to test renewable scenarios.")
+        network_ef = st.number_input("Network energy intensity (kWh/GB)", min_value=0.0, value=0.06, step=0.01, format="%.3f", key="tele_network_ef")
+        default_dist_vc = st.number_input("Default dist. to VC if missing (km)", min_value=1.0, value=15.0, step=1.0, key="tele_default_vc")
+        default_dist_alt = st.number_input("Default dist. to alternative if missing (km)", min_value=1.0, value=80.0, step=5.0, key="tele_default_alt")
 
-# Fallback defaults when a column is missing / a row is incomplete
-DEFAULTS = {
-    "triage_outcome":             "Green",
-    "transport_mode":             "Bus",
-    "accompanying_persons":       1,
-    "distance_to_vc_km":          15.0,
-    "distance_to_alternative_km": 80.0,
-}
+# ── DERIVED VALUES FROM PARAMS ────────────────────────────────────────────────
+total_device_w = fundus_w + slit_w + workstation_w + router_w
+e_device = (total_device_w * session_min / 60_000) * grid_ef
+e_digital = (dicom_mb / 1024) * network_ef * grid_ef
 
-# ============================================================
-# 2. GPR CATCHMENT VILLAGE LOOKUP
-# ============================================================
-# (village_name, distance_to_GPR_VC_km) — approximated via Google Maps
-# Covers Rajendranagar + Chevella mandals, Ranga Reddy district.
-GPR_CATCHMENT_VILLAGES = [
-    ("Kismathpur",        1.2), ("Bandlaguda",         3.5),
-    ("Attapur",           4.8), ("Rajendranagar",      5.5),
-    ("Katedan",           6.2), ("Mailardevpally",     7.1),
-    ("Shastripuram",      7.8), ("Suleman Nagar",      8.6),
-    ("Hyderguda",         9.4), ("Budvel",            10.3),
-    ("Upparpally",       11.5), ("Balapur",           12.7),
-    ("Pahadi Shareef",   13.9), ("Aramgarh",          14.5),
-    ("Barkas",           15.2), ("Chandrayangutta",   16.4),
-    ("Shamshabad",       17.8), ("Kothur",            19.2),
-    ("Maheshwaram",      20.5), ("Ibrahimpatnam",     21.8),
-    ("Chevella",         23.1), ("Manchal",           24.6),
-    ("Yacharam",         25.9), ("Kandukur",          18.7),
-    ("Moinabad",         16.9), ("Shabad",            22.4),
-    ("Farooqnagar",      24.0), ("Nagarkurnool Rd",   12.1),
-    ("Injapur",           9.8), ("Adibatla",          15.6),
-]
+# ── COMPUTE (inline, using adjustable params) ─────────────────────────────────
+clean_df, missing_cols, rows_defaulted = validate_and_fill_defaults(raw_df)
 
-# ============================================================
-# 3. REALISTIC DEMO-DATA GENERATOR
-# ============================================================
+# Override defaults with adjustable params
+clean_df["distance_to_vc_km"] = clean_df["distance_to_vc_km"].fillna(default_dist_vc)
+clean_df["distance_to_alternative_km"] = clean_df["distance_to_alternative_km"].fillna(default_dist_alt)
 
-def generate_dummy_data(n_patients: int = 50, seed: int = 42) -> pd.DataFrame:
-    """
-    Generate a realistic 50-patient demo dataset for GPR Vision Centre.
+# ── EDITABLE PATIENT DATA (persists edits across reruns, resets if data source changes) ──
+if st.session_state.get("tele_data_key") != data_label:
+    st.session_state["tele_data_key"] = data_label
+    st.session_state["tele_edited_df"] = clean_df.copy()
 
-    Respects Rani et al. 2024's 84/8/8 triage distribution and uses
-    catchment-specific villages, transport mixes, and referral distances.
-    """
-    rng = np.random.default_rng(seed)
+df = st.session_state["tele_edited_df"].copy()
+modal_ef = df["transport_mode"].map(TRANSPORT_EF).fillna(TRANSPORT_EF["Bus"])
+multiplier = 1 + df["accompanying_persons"]
 
-    # ---- Triage: exact 84/8/8 for n=50 -> 42 Green, 4 Yellow, 4 Red ----
-    n_green  = int(round(TRIAGE_BENCHMARK["Green"]  * n_patients))
-    n_yellow = int(round(TRIAGE_BENCHMARK["Yellow"] * n_patients))
-    n_red    = n_patients - n_green - n_yellow            # absorbs rounding
-    triage = np.array(["Green"] * n_green
-                      + ["Yellow"] * n_yellow
-                      + ["Red"] * n_red)
-    rng.shuffle(triage)
+df["E_counterfactual_kg"] = df["distance_to_alternative_km"] * 2 * modal_ef * multiplier
+df["E_travel_to_vc_kg"]   = df["distance_to_vc_km"] * 2 * modal_ef * multiplier
+df["E_device_kg"]         = e_device
+df["E_digital_kg"]        = e_digital
+df["E_teleconsultation_kg"] = df["E_travel_to_vc_kg"] + e_device + e_digital
+df["CO2_saved_kg"]        = df["E_counterfactual_kg"] - df["E_teleconsultation_kg"]
+df["trees_equivalent"]    = df["CO2_saved_kg"] / TREE_ABSORPTION_KGCO2_PER_YEAR
+df["is_negative"]         = df["CO2_saved_kg"] < 0
 
-    # ---- Village of origin (weight nearer villages higher) ------------
-    village_names = np.array([v[0] for v in GPR_CATCHMENT_VILLAGES])
-    village_dists = np.array([v[1] for v in GPR_CATCHMENT_VILLAGES])
-    weights = 1.0 / (village_dists + 2.0)
-    weights = weights / weights.sum()
-    idx = rng.choice(len(GPR_CATCHMENT_VILLAGES), size=n_patients, p=weights)
-    village_of_origin = village_names[idx]
-    distance_to_vc_km = village_dists[idx] + rng.normal(0, 0.6, n_patients)
-    distance_to_vc_km = np.clip(distance_to_vc_km, 0.5, None).round(1)
+# Aggregates
+total_co2_kg     = df["CO2_saved_kg"].sum()
+total_co2_t      = total_co2_kg / 1000
+total_trees      = total_co2_kg / TREE_ABSORPTION_KGCO2_PER_YEAR
+total_car_km     = total_co2_kg / CAR_KM_EQUIV_KGCO2_PER_KM
+total_flights    = total_co2_kg / FLIGHT_EQUIV_KGCO2
+avg_co2          = df["CO2_saved_kg"].mean()
+negative_count   = int(df["is_negative"].sum())
+total_consults   = len(df)
 
-    # ---- Counterfactual distance depends on triage --------------------
-    dist_alt = np.zeros(n_patients)
-    for i, t in enumerate(triage):
-        if t == "Green":
-            # LVPEI Secondary (KAR, Banjara Hills)
-            dist_alt[i] = rng.normal(loc=26, scale=3.0)
-        elif t == "Yellow":
-            # Secondary / low-tertiary Hub
-            dist_alt[i] = rng.normal(loc=34, scale=4.5)
-        else:  # Red
-            # Tertiary Centre (KAR / KVC) — long-tail referral
-            dist_alt[i] = rng.normal(loc=65, scale=25.0)
-    # Ensure alternative distance never shorter than distance to VC + 5 km
-    dist_alt = np.maximum(dist_alt, distance_to_vc_km + 5)
-    dist_alt = np.clip(dist_alt, 8.0, 150.0).round(1)
+triage_summary = df.groupby("triage_outcome").agg(
+    patients=("CO2_saved_kg", "count"),
+    co2_saved_kg=("CO2_saved_kg", "sum")
+).reindex(["Green", "Yellow", "Red"]).fillna(0).reset_index()
 
-    # ---- Transport mode (rural Telangana weighting) -------------------
-    transport_choices = list(TRANSPORT_EF.keys())
-    # Base weights: Motorcycle & Bus dominate, then Auto, then Walking,
-    # occasional Shared Taxi/Car, rare Train, rare Bicycle.
-    base_weights = {
-        "Walking":     0.10,
-        "Bicycle":     0.03,
-        "Motorcycle":  0.34,
-        "Auto":        0.18,
-        "Bus":         0.22,
-        "Car":         0.06,
-        "Train":       0.01,
-        "Shared Taxi": 0.06,
-    }
-    transport_mode = []
-    for i in range(n_patients):
-        w = base_weights.copy()
-        d = distance_to_vc_km[i]
-        # Walking only realistic for <3 km; push weight away otherwise
-        if d > 3:
-            w["Walking"] = 0.01
-        if d > 10:
-            w["Bicycle"] = 0.005
-        # For long referral trips (Red), bus/car/train become more likely
-        if triage[i] == "Red":
-            w["Bus"]        *= 1.4
-            w["Car"]        *= 2.0
-            w["Train"]      *= 3.0
-            w["Motorcycle"] *= 0.6
-        vals = np.array([w[m] for m in transport_choices])
-        vals = vals / vals.sum()
-        transport_mode.append(rng.choice(transport_choices, p=vals))
-    transport_mode = np.array(transport_mode)
+if missing_cols:
+    st.markdown(f'<div class="warn-box">⚠️ Columns not found and filled with defaults: <strong>{", ".join(missing_cols)}</strong>. {rows_defaulted} row(s) used fallback values.</div>', unsafe_allow_html=True)
 
-    # ---- Accompanying persons -----------------------------------------
-    # Green: mostly 0-1, Yellow: 1-2, Red: 1-3 (elderly / referral cases)
-    accompanying = np.zeros(n_patients, dtype=int)
-    for i, t in enumerate(triage):
-        if t == "Green":
-            accompanying[i] = rng.choice([0, 1, 2], p=[0.55, 0.35, 0.10])
-        elif t == "Yellow":
-            accompanying[i] = rng.choice([0, 1, 2, 3], p=[0.10, 0.50, 0.30, 0.10])
-        else:  # Red
-            accompanying[i] = rng.choice([1, 2, 3], p=[0.35, 0.45, 0.20])
+st.caption(f"Data: {data_label} · {total_consults} consultations · Grid EF: {grid_ef:.4f} kgCO₂/kWh · Device load: {total_device_w}W · Session: {session_min:.0f} min")
 
-    # ---- Consultation dates (last 60 days) ----------------------------
-    today = date.today()
-    days_back = rng.integers(0, 60, size=n_patients)
-    consultation_date = [
-        (today - timedelta(days=int(d))).isoformat() for d in days_back
-    ]
+# ── KPI CARDS ─────────────────────────────────────────────────────────────────
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">Total CO₂ Saved</div><div class="kpi-value">{total_co2_t:.2f}</div><div class="kpi-unit">tonnes CO₂e</div></div>', unsafe_allow_html=True)
+with k2:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">Trees Equivalent</div><div class="kpi-value">{total_trees:.0f}</div><div class="kpi-unit">trees absorbing CO₂ for 1 year</div></div>', unsafe_allow_html=True)
+with k3:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">Car Travel Avoided</div><div class="kpi-value">{total_car_km:,.0f}</div><div class="kpi-unit">km equivalent</div></div>', unsafe_allow_html=True)
+with k4:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">Flights Avoided</div><div class="kpi-value">{total_flights:.1f}</div><div class="kpi-unit">Delhi–Hyderabad equivalent</div></div>', unsafe_allow_html=True)
 
-    # ---- Patient IDs ---------------------------------------------------
-    patient_ids = [f"GPR-2026-{1000 + i:04d}" for i in range(n_patients)]
+st.markdown("<br>", unsafe_allow_html=True)
 
-    # ---- Assemble DataFrame -------------------------------------------
-    df = pd.DataFrame({
-        "patient_id":                 patient_ids,
-        "consultation_date":          consultation_date,
-        "village_of_origin":          village_of_origin,
-        "triage_outcome":             triage,
-        "transport_mode":             transport_mode,
-        "accompanying_persons":       accompanying,
-        "distance_to_vc_km":          distance_to_vc_km,
-        "distance_to_alternative_km": dist_alt,
-    })
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total consultations", f"{total_consults:,}")
+m2.metric("Avg CO₂ saved / patient", f"{avg_co2:.2f} kg")
+m3.metric("E_device per patient", f"{e_device:.4f} kg", f"{total_device_w}W × {session_min:.0f} min")
+m4.metric("Edge cases (negative ΔE)", str(negative_count) + (" ⚠️" if negative_count > 0 else " ✓"))
 
-    # Sort by date so the table looks natural
-    df = df.sort_values("consultation_date").reset_index(drop=True)
-    return df
+st.markdown("<br>", unsafe_allow_html=True)
 
+# ── CHARTS ────────────────────────────────────────────────────────────────────
+COLORS = {"Green": "#2D6A2D", "Yellow": "#E6A817", "Red": "#C0392B"}
 
-# ============================================================
-# 4. VALIDATION & DEFAULT-FILLING FOR UPLOADED CSVs
-# ============================================================
+ch1, ch2 = st.columns(2)
 
-def validate_and_fill_defaults(df: pd.DataFrame):
-    """
-    Ensure every EXPECTED_COLUMN exists; fill missing columns with DEFAULTS,
-    and fill NaN cells in existing columns with the same defaults.
-
-    Returns:
-        clean_df       : the corrected DataFrame
-        missing_cols   : list of columns that had to be added
-        rows_defaulted : number of rows that received at least one fallback
-    """
-    clean_df = df.copy()
-    missing_cols = []
-
-    # Auto-generate identifiers/dates if missing
-    if "patient_id" not in clean_df.columns:
-        clean_df["patient_id"] = [f"UP-{i:04d}" for i in range(len(clean_df))]
-        missing_cols.append("patient_id")
-    if "consultation_date" not in clean_df.columns:
-        clean_df["consultation_date"] = date.today().isoformat()
-        missing_cols.append("consultation_date")
-
-    # Fill any missing schema columns with defaults
-    for col in EXPECTED_COLUMNS:
-        if col not in clean_df.columns:
-            clean_df[col] = DEFAULTS.get(col, np.nan)
-            missing_cols.append(col)
-
-    # Track which rows needed a fallback value
-    before = clean_df[EXPECTED_COLUMNS].isna().any(axis=1)
-    for col, val in DEFAULTS.items():
-        if col in clean_df.columns:
-            clean_df[col] = clean_df[col].fillna(val)
-    rows_defaulted = int(before.sum())
-
-    # Normalise triage_outcome capitalisation (Green/Yellow/Red)
-    clean_df["triage_outcome"] = (
-        clean_df["triage_outcome"].astype(str).str.strip().str.title()
+with ch1:
+    st.markdown('<div class="section-title">CO₂ Saved by Triage Category</div>', unsafe_allow_html=True)
+    fig = px.bar(
+        triage_summary, x="triage_outcome", y="co2_saved_kg",
+        color="triage_outcome", color_discrete_map=COLORS,
+        text=triage_summary["co2_saved_kg"].apply(lambda x: f"{x:.1f} kg"),
+        labels={"co2_saved_kg": "CO₂ Saved (kg)", "triage_outcome": ""},
     )
-    clean_df.loc[
-        ~clean_df["triage_outcome"].isin(["Green", "Yellow", "Red"]),
-        "triage_outcome"
-    ] = DEFAULTS["triage_outcome"]
+    fig.update_traces(textposition="outside", marker_line_width=0)
+    fig.update_layout(
+        showlegend=False, plot_bgcolor="white", paper_bgcolor="white",
+        font_family="Inter", margin=dict(t=10, b=10, l=0, r=0),
+        yaxis_title="CO₂ Saved (kgCO₂e)", yaxis=dict(gridcolor="#F0F4F0"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Coerce numeric columns
-    for c in ["distance_to_vc_km", "distance_to_alternative_km",
-              "accompanying_persons"]:
-        clean_df[c] = pd.to_numeric(clean_df[c], errors="coerce").fillna(
-            DEFAULTS[c]
-        )
+with ch2:
+    st.markdown('<div class="section-title">Emission Breakdown (Per-Patient Average)</div>', unsafe_allow_html=True)
+    avg_cf = df["E_counterfactual_kg"].mean()
+    avg_tv = df["E_travel_to_vc_kg"].mean()
+    labels = ["Counterfactual\n(without tele)", "Travel to\nVision Centre", "Device\nelectricity", "Digital\noverhead"]
+    values = [avg_cf, avg_tv, e_device, e_digital]
+    bar_colors = ["#C0392B", "#E6A817", "#5A7A5A", "#C5DCC5"]
+    fig2 = go.Figure(go.Bar(
+        x=labels, y=values,
+        marker_color=bar_colors,
+        text=[f"{v:.3f} kg" for v in values],
+        textposition="outside",
+    ))
+    fig2.update_layout(
+        plot_bgcolor="white", paper_bgcolor="white", font_family="Inter",
+        margin=dict(t=10, b=10, l=0, r=0), showlegend=False,
+        yaxis_title="kgCO₂e (avg per patient)", yaxis=dict(gridcolor="#F0F4F0"),
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
-    return clean_df, missing_cols, rows_defaulted
+st.markdown('<div class="section-title">Transport Mode Distribution</div>', unsafe_allow_html=True)
+mode_df = df.groupby("transport_mode").agg(
+    patients=("CO2_saved_kg", "count"),
+    avg_saving=("CO2_saved_kg", "mean"),
+).reset_index().sort_values("patients", ascending=False)
+fig3 = px.bar(
+    mode_df, x="transport_mode", y="patients",
+    color="avg_saving", color_continuous_scale=["#C5DCC5", "#1A3A1A"],
+    text="patients",
+    labels={"patients": "No. of Patients", "transport_mode": "Mode", "avg_saving": "Avg CO₂ Saved (kg)"},
+)
+fig3.update_traces(textposition="outside", marker_line_width=0)
+fig3.update_layout(
+    plot_bgcolor="white", paper_bgcolor="white", font_family="Inter",
+    margin=dict(t=10, b=10, l=0, r=0),
+    yaxis=dict(gridcolor="#F0F4F0"),
+    coloraxis_colorbar=dict(title="Avg CO₂<br>Saved (kg)", thickness=14),
+)
+st.plotly_chart(fig3, use_container_width=True)
 
+# ── PER-PATIENT TABLE (editable) ──────────────────────────────────────────────
+st.markdown('<div class="section-title">Per-Patient Detail</div>', unsafe_allow_html=True)
+st.caption("✏️ Triage, Transport, and both distances are editable — double-click a cell to change it. CO₂ figures recalculate automatically.")
 
-# ============================================================
-# 5. QUICK SELF-TEST (run: python carbon_calc.py)
-# ============================================================
-if __name__ == "__main__":
-    demo = generate_dummy_data()
-    print(f"Generated {len(demo)} patients.")
-    print(demo["triage_outcome"].value_counts(normalize=True).round(3))
-    print(demo["transport_mode"].value_counts())
-    print(demo.head())
+fa, fb, fc, fd = st.columns([1, 1, 1, 0.6])
+with fa:
+    triage_filter = st.multiselect("Triage", ["Green", "Yellow", "Red"], default=["Green", "Yellow", "Red"])
+with fb:
+    mode_filter = st.multiselect("Transport mode", list(TRANSPORT_EF.keys()), default=list(TRANSPORT_EF.keys()))
+with fc:
+    show_neg = st.checkbox("Edge cases only (ΔE < 0)")
+with fd:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("↺ Reset edits"):
+        st.session_state["tele_edited_df"] = clean_df.copy()
+        st.rerun()
+
+disp = df[df["triage_outcome"].isin(triage_filter) & df["transport_mode"].isin(mode_filter)]
+if show_neg:
+    disp = disp[disp["is_negative"]]
+
+table = disp[[
+    "patient_id", "consultation_date", "triage_outcome", "transport_mode",
+    "distance_to_vc_km", "distance_to_alternative_km",
+    "E_counterfactual_kg", "E_teleconsultation_kg", "CO2_saved_kg", "trees_equivalent",
+]].copy()
+table.columns = [
+    "Patient ID", "Date", "Triage", "Transport",
+    "Dist. to VC (km)", "Dist. to Alt. (km)",
+    "Counterfactual CO₂ (kg)", "Teleconsult CO₂ (kg)", "ΔE Saved (kg)", "Trees Equiv.",
+]
+for col in ["Counterfactual CO₂ (kg)", "Teleconsult CO₂ (kg)", "ΔE Saved (kg)", "Trees Equiv."]:
+    table[col] = table[col].round(3)
+
+edited_table = st.data_editor(
+    table,
+    use_container_width=True,
+    height=400,
+    hide_index=True,
+    key="tele_patient_editor",
+    disabled=[
+        "Patient ID", "Date",
+        "Counterfactual CO₂ (kg)", "Teleconsult CO₂ (kg)", "ΔE Saved (kg)", "Trees Equiv.",
+    ],
+    column_config={
+        "Triage": st.column_config.SelectboxColumn("Triage", options=["Green", "Yellow", "Red"], required=True),
+        "Transport": st.column_config.SelectboxColumn("Transport", options=list(TRANSPORT_EF.keys()), required=True),
+        "Dist. to VC (km)": st.column_config.NumberColumn("Dist. to VC (km)", min_value=0.0, step=0.5, format="%.1f"),
+        "Dist. to Alt. (km)": st.column_config.NumberColumn("Dist. to Alt. (km)", min_value=0.0, step=0.5, format="%.1f"),
+    },
+)
+
+# Merge any edits back into the persistent store, keyed by Patient ID, then rerun so
+# every KPI/chart above recalculates off the new values.
+edit_cols = ["Triage", "Transport", "Dist. to VC (km)", "Dist. to Alt. (km)"]
+if not edited_table[edit_cols].equals(table[edit_cols]):
+    store = st.session_state["tele_edited_df"].set_index("patient_id")
+    edits = edited_table.set_index("Patient ID")[edit_cols]
+    store.loc[edits.index, "triage_outcome"] = edits["Triage"]
+    store.loc[edits.index, "transport_mode"] = edits["Transport"]
+    store.loc[edits.index, "distance_to_vc_km"] = edits["Dist. to VC (km)"]
+    store.loc[edits.index, "distance_to_alternative_km"] = edits["Dist. to Alt. (km)"]
+    st.session_state["tele_edited_df"] = store.reset_index()
+    st.rerun()
+
+if disp["is_negative"].any():
+    st.markdown(f'<div class="warn-box">⚠️ {disp["is_negative"].sum()} patient(s) show negative ΔE — their distance to the alternative facility was shorter than their distance to GPR. These are edge cases.</div>', unsafe_allow_html=True)
+
+csv_out = table.to_csv(index=False)
+st.download_button("⬇️ Download results CSV", csv_out, "LVPEI_GPR_carbon_savings.csv", "text/csv")
+
+with st.expander("📋 Current assumptions summary"):
+    st.markdown(f"""
+    | Parameter | Value | Source |
+    |---|---|---|
+    | Grid emission factor | {grid_ef:.4f} kgCO₂/kWh | CEA v21.0 FY2024-25 (adjustable) |
+    | Session duration | {session_min:.0f} min | Dr. Rani 5–15 min range (adjustable) |
+    | Total device load | {total_device_w}W | {fundus_w}W fundus + {slit_w}W slit + {workstation_w}W workstation + {router_w}W router |
+    | E_device per patient | {e_device:.5f} kgCO₂ | Scope 2 |
+    | DICOM size | {dicom_mb} MB | Standard fundus photo (adjustable) |
+    | E_digital per patient | {e_digital:.6f} kgCO₂ | Scope 3 — negligible |
+    | Default dist. to VC | {default_dist_vc:.0f} km | GPR catchment estimate (adjustable) |
+    | Default dist. to alt. | {default_dist_alt:.0f} km | Rani et al. primary band (adjustable) |
+    | Tree absorption | {TREE_ABSORPTION_KGCO2_PER_YEAR} kgCO₂/year | Literature standard |
+    """)
+
+st.divider()
+st.caption("Tele-ophthalmology carbon calculator · Daiwik Singh (2024B1A41063H) · BITS Pilani Hyderabad · Supervisor: Dr. Padmaja Kumari Rani, LVPEI · PS-I 2025–26")
