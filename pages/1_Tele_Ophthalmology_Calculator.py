@@ -1,25 +1,3 @@
-# ============================================================
-# carbon_calc.py — LVPEI GPR Tele-ophthalmology Carbon Calculator
-# Author: Daiwik Singh (2024B1A41063H), BITS Pilani Hyderabad
-# PS-I 2025-26, LVPEI GPR Vision Centre, Kismathpur
-# ============================================================
-"""
-Core constants, emission factors, and demo-data generator for the
-Tele-ophthalmology Carbon Calculator.
-
-Realistic demo data (generate_dummy_data):
-  • Triage split fixed at 84% Green / 8% Yellow / 8% Red (Rani et al. 2024).
-  • Villages drawn from the actual GPR VC catchment (Rajendranagar &
-    Chevella mandals, Ranga Reddy district, Telangana).
-  • Transport modal share weighted for rural Telangana.
-  • Distance to VC drawn from village lookup + small jitter.
-  • Counterfactual distance depends on triage:
-        Green  -> LVPEI Secondary (KAR, Banjara Hills)   ~22-32 km
-        Yellow -> Secondary / low-tertiary               ~28-45 km
-        Red    -> Tertiary Centre (KAR / KVC)            ~35-120 km
-  • Accompanying persons biased upward for Yellow/Red patients.
-  • Consultation dates spread across the last 60 days.
-"""
 
 import numpy as np
 import pandas as pd
